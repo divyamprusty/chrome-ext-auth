@@ -10,115 +10,128 @@ const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
 
-  // Loop suppression flags
   const applyingExternalRef = useRef<boolean>(false);
-  const suppressNextBroadcastRef = useRef<boolean>(false);
   const writingStorageRef = useRef<boolean>(false);
   const lastAccessTokenRef = useRef<string | null>(null);
 
-  // Restore from extension storage on popup open
+  // Restore from storage on popup open (no sending)
   useEffect(() => {
     const sb = getSupabase();
     if (!sb) return;
 
     chrome.storage.local.get('supabase_token', async ({ supabase_token }) => {
+      console.log("[popup] restore -> hasToken:", !!supabase_token);
       if (supabase_token) {
         try {
-          suppressNextBroadcastRef.current = true;
           const { data: { user } } = await sb.auth.setSession({
             access_token: supabase_token.access_token,
             refresh_token: supabase_token.refresh_token
           });
+          console.log("[popup] restore setSession -> email:", user?.email);
           if (user?.email) {
             setEmail(user.email);
             lastAccessTokenRef.current = supabase_token.access_token;
           }
-        } catch {
+        } catch (e) {
+          console.warn("[popup] restore setSession error:", e);
           setEmail(null);
         }
       }
     });
   }, []);
 
-  // Broadcast local auth changes (but not when applying external)
+  // Track local auth to update storage only (no messaging)
   useEffect(() => {
     const sb = getSupabase();
     if (!sb) return;
 
     const { data: sub } = sb.auth.onAuthStateChange((event, session) => {
-      // If we just applied an external token, drop the very next event
-      if (suppressNextBroadcastRef.current) {
-        suppressNextBroadcastRef.current = false;
-        return;
-      }
+      console.log("[popup] onAuthStateChange:", event, "hasSession:", !!session);
       if (applyingExternalRef.current) return;
 
       if ((event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') && session) {
-        if (lastAccessTokenRef.current === session.access_token) return;
+        if (lastAccessTokenRef.current === session.access_token) {
+          console.log("[popup] storage write skipped (same token)");
+          return;
+        }
         lastAccessTokenRef.current = session.access_token;
 
         const tok = { access_token: session.access_token, refresh_token: session.refresh_token };
-        const msg: SessionMessage = { type: 'SYNC_TOKEN', source: 'popup', token: tok };
-
         writingStorageRef.current = true;
-        chrome.storage.local.set({ supabase_token: tok }, () => { setTimeout(() => { writingStorageRef.current = false; }, 0); });
-        chrome.runtime.sendMessage(msg);
+        console.log("[popup] storage set supabase_token");
+        chrome.storage.local.set({ supabase_token: tok }, () => {
+          setTimeout(() => { writingStorageRef.current = false; }, 0);
+        });
       } else if (event === 'SIGNED_OUT') {
-        const msg: SessionMessage = { type: 'SYNC_TOKEN', source: 'popup', token: null };
         writingStorageRef.current = true;
-        chrome.storage.local.remove('supabase_token', () => { setTimeout(() => { writingStorageRef.current = false; }, 0); });
-        chrome.runtime.sendMessage(msg);
+        console.log("[popup] storage remove supabase_token");
+        chrome.storage.local.remove('supabase_token', () => {
+          setTimeout(() => { writingStorageRef.current = false; }, 0);
+        });
       }
     });
     return () => sub?.subscription.unsubscribe();
   }, []);
 
-  // Receive forwarded tokens from background/web
+  // Receive tokens from background (relayed from web)
   useEffect(() => {
     const sb = getSupabase();
     if (!sb) return;
 
     const listener = async (msg: unknown) => {
       const message = msg as SessionMessage;
-      if (message.type !== 'SYNC_TOKEN' || message.source === 'popup') return;
+      if (message.type !== 'SYNC_TOKEN') return;
+      console.log("[popup] runtime.onMessage SYNC_TOKEN from:", message.source, "hasToken:", !!message.token);
 
       const tok = message.token;
       if (tok?.access_token && tok?.refresh_token) {
         const current = (await sb.auth.getSession()).data.session;
-        if (current && current.access_token === tok.access_token) return;
+        if (current && current.access_token === tok.access_token) {
+          console.log("[popup] incoming token equals current, skip");
+          return;
+        }
 
         applyingExternalRef.current = true;
-        suppressNextBroadcastRef.current = true;
         try {
           const { data: { user } } = await sb.auth.setSession({
             access_token: tok.access_token,
             refresh_token: tok.refresh_token
           });
+          console.log("[popup] applied external token -> email:", user?.email);
           if (user?.email) {
             setEmail(user.email);
             lastAccessTokenRef.current = tok.access_token;
 
             writingStorageRef.current = true;
-            chrome.storage.local.set({ supabase_token: tok }, () => { setTimeout(() => { writingStorageRef.current = false; }, 0); });
+            console.log("[popup] storage set supabase_token (from external)");
+            chrome.storage.local.set({ supabase_token: tok }, () => {
+              setTimeout(() => { writingStorageRef.current = false; }, 0);
+            });
           }
         } finally {
           applyingExternalRef.current = false;
         }
       } else {
         const { data: { session: current } } = await sb.auth.getSession();
-        if (!current) return;
+        if (!current) {
+          console.log("[popup] signOut skip, no current session");
+          return;
+        }
 
         applyingExternalRef.current = true;
-        suppressNextBroadcastRef.current = true;
         try {
+          console.log("[popup] signOut(local) due to external null");
           await sb.auth.signOut({ scope: 'local' });
           setEmail(null);
           lastAccessTokenRef.current = null;
 
           writingStorageRef.current = true;
-          chrome.storage.local.remove('supabase_token', () => { setTimeout(() => { writingStorageRef.current = false; }, 0); });
-        } catch {
-          // ignore 403 or already-signed-out
+          console.log("[popup] storage remove supabase_token (external null)");
+          chrome.storage.local.remove('supabase_token', () => {
+            setTimeout(() => { writingStorageRef.current = false; }, 0);
+          });
+        } catch (e) {
+          console.warn("[popup] signOut(local) error (ignored):", e);
         } finally {
           applyingExternalRef.current = false;
         }
@@ -128,7 +141,7 @@ const App: React.FC = () => {
     return () => chrome.runtime.onMessage.removeListener(listener);
   }, []);
 
-  // React to storage changes (only when not writing ourselves)
+  // React to storage changes (from background updates)
   useEffect(() => {
     const sb = getSupabase();
     if (!sb) return;
@@ -139,15 +152,19 @@ const App: React.FC = () => {
         if (writingStorageRef.current) return;
 
         const tok = changes.supabase_token.newValue as { access_token: string; refresh_token: string } | null;
+        console.log("[popup] storage.onChanged -> hasToken:", !!tok);
 
         if (tok?.access_token && tok?.refresh_token) {
           const current = (await sb.auth.getSession()).data.session;
-          if (current && current.access_token === tok.access_token) return;
+          if (current && current.access_token === tok.access_token) {
+            console.log("[popup] storage apply skip (same token)");
+            return;
+          }
 
           applyingExternalRef.current = true;
-          suppressNextBroadcastRef.current = true;
           try {
             const { data } = await sb.auth.setSession({ access_token: tok.access_token, refresh_token: tok.refresh_token });
+            console.log("[popup] storage applied token -> email:", data.user?.email);
             setEmail(data.user?.email ?? null);
             lastAccessTokenRef.current = tok.access_token;
           } finally {
@@ -155,16 +172,19 @@ const App: React.FC = () => {
           }
         } else {
           const { data: { session: current } } = await sb.auth.getSession();
-          if (!current) return;
+          if (!current) {
+            console.log("[popup] storage signOut skip, no session");
+            return;
+          }
 
           applyingExternalRef.current = true;
-          suppressNextBroadcastRef.current = true;
           try {
+            console.log("[popup] storage signOut(local)");
             await sb.auth.signOut({ scope: 'local' });
             setEmail(null);
             lastAccessTokenRef.current = null;
-          } catch {
-            // ignore 403 or already-signed-out
+          } catch (e) {
+            console.warn("[popup] storage signOut(local) error (ignored):", e);
           } finally {
             applyingExternalRef.current = false;
           }
@@ -185,6 +205,7 @@ const App: React.FC = () => {
       password: formPassword
     });
     setLoading(false);
+    console.log("[popup] login result -> hasSession:", !!data.session, "error:", error?.message);
     if (error) {
       setError(error.message);
       return;
@@ -196,10 +217,10 @@ const App: React.FC = () => {
 
       const tok = { access_token: s.access_token, refresh_token: s.refresh_token };
       writingStorageRef.current = true;
-      chrome.storage.local.set({ supabase_token: tok }, () => { setTimeout(() => { writingStorageRef.current = false; }, 0); });
-
-      const msg: SessionMessage = { type: 'SYNC_TOKEN', source: 'popup', token: tok };
-      chrome.runtime.sendMessage(msg);
+      console.log("[popup] login storage set supabase_token");
+      chrome.storage.local.set({ supabase_token: tok }, () => {
+        setTimeout(() => { writingStorageRef.current = false; }, 0);
+      });
     }
   };
 
@@ -208,24 +229,21 @@ const App: React.FC = () => {
     if (!sb) return;
 
     const { data: { session: current } } = await sb.auth.getSession();
+    console.log("[popup] logout -> hasSession:", !!current);
     if (current) {
       try {
         await sb.auth.signOut({ scope: 'local' });
-      } catch {
-        // ignore 403 or already-signed-out
+      } catch (e) {
+        console.warn("[popup] logout signOut(local) error (ignored):", e);
       }
     }
     setEmail(null);
     lastAccessTokenRef.current = null;
 
     writingStorageRef.current = true;
-    chrome.storage.local.remove('supabase_token', () => { setTimeout(() => { writingStorageRef.current = false; }, 0); });
-
-    const msg: SessionMessage = { type: 'SYNC_TOKEN', source: 'popup', token: null };
-    chrome.tabs.query({ url: 'http://localhost:5173/*' }, (tabs) => {
-      for (const tab of tabs) {
-        if (tab.id) chrome.tabs.sendMessage(tab.id, msg);
-      }
+    console.log("[popup] logout storage remove supabase_token");
+    chrome.storage.local.remove('supabase_token', () => {
+      setTimeout(() => { writingStorageRef.current = false; }, 0);
     });
   };
 
@@ -251,7 +269,7 @@ const App: React.FC = () => {
 
             <div className="rounded-xl border bg-white p-4 shadow-sm">
               <p className="text-sm text-slate-600">
-                You are authenticated. Open the web app tab and your session will be in sync.
+                You are authenticated. Open the web app tab; it will broadcast tokens.
               </p>
             </div>
 
@@ -309,7 +327,7 @@ const App: React.FC = () => {
             </div>
 
             <p className="text-xs text-slate-500">
-              Tip: Signing in here will sync with the web app if it’s open on http://localhost:5173
+              Tip: Web app at http://localhost:5173 should be open to broadcast tokens.
             </p>
           </div>
         )}
