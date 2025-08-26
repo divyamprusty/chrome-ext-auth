@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { supabase } from './auth/supabaseClient';
 import { SessionMessage } from './types';
 import './index.css';
@@ -10,7 +10,10 @@ const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
 
-  // Restore session from storage (expects object with both tokens)
+  const applyingExternalRef = useRef<boolean>(false);
+  const writingStorageRef = useRef<boolean>(false);
+  const lastAccessTokenRef = useRef<string | null>(null);
+
   useEffect(() => {
     chrome.storage.local.get('supabase_token', async ({ supabase_token }) => {
       if (supabase_token && supabase) {
@@ -19,7 +22,10 @@ const App: React.FC = () => {
             access_token: supabase_token.access_token,
             refresh_token: supabase_token.refresh_token
           });
-          if (user?.email) setEmail(user.email);
+          if (user?.email) {
+            setEmail(user.email);
+            lastAccessTokenRef.current = supabase_token.access_token;
+          }
         } catch {
           setEmail(null);
         }
@@ -27,50 +33,69 @@ const App: React.FC = () => {
     });
   }, []);
 
-  // Forward auth changes with both tokens; maintain storage
   useEffect(() => {
     if (!supabase) return;
     const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
-      if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
-        if (session) {
-          const tok = { access_token: session.access_token, refresh_token: session.refresh_token };
-          const msg: SessionMessage = { type: 'SYNC_TOKEN', token: tok };
-          chrome.runtime.sendMessage(msg);
-          chrome.storage.local.set({ supabase_token: tok });
-        }
-      } else if (event === 'SIGNED_OUT') {
-        const msg: SessionMessage = { type: 'SYNC_TOKEN', token: null };
+      if (applyingExternalRef.current) return;
+
+      if ((event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') && session) {
+        if (lastAccessTokenRef.current === session.access_token) return;
+        lastAccessTokenRef.current = session.access_token;
+
+        const tok = { access_token: session.access_token, refresh_token: session.refresh_token };
+        const msg: SessionMessage = { type: 'SYNC_TOKEN', source: 'popup', token: tok };
+
+        writingStorageRef.current = true;
+        chrome.storage.local.set({ supabase_token: tok }, () => { setTimeout(() => { writingStorageRef.current = false; }, 0); });
         chrome.runtime.sendMessage(msg);
-        chrome.storage.local.remove('supabase_token');
+      } else if (event === 'SIGNED_OUT') {
+        const msg: SessionMessage = { type: 'SYNC_TOKEN', source: 'popup', token: null };
+        writingStorageRef.current = true;
+        chrome.storage.local.remove('supabase_token', () => { setTimeout(() => { writingStorageRef.current = false; }, 0); });
+        chrome.runtime.sendMessage(msg);
       }
     });
     return () => sub?.subscription.unsubscribe();
   }, []);
 
-  // Receive SYNC_TOKEN messages (from background/content)
   useEffect(() => {
     const listener = async (msg: unknown) => {
       if (!supabase) return;
       const message = msg as SessionMessage;
-      if (message.type === 'SYNC_TOKEN') {
-        const tok = message.token;
-        if (tok?.access_token && tok?.refresh_token) {
-          try {
-            const { data: { user } } = await supabase.auth.setSession({
-              access_token: tok.access_token,
-              refresh_token: tok.refresh_token
-            });
-            if (user?.email) {
-              setEmail(user.email);
-              chrome.storage.local.set({ supabase_token: tok });
-            }
-          } catch {
-            setEmail(null);
+      if (message.type !== 'SYNC_TOKEN' || message.source === 'popup') return;
+
+      const tok = message.token;
+      if (tok?.access_token && tok?.refresh_token) {
+        const current = (await supabase.auth.getSession()).data.session;
+        if (current && current.access_token === tok.access_token) return;
+
+        applyingExternalRef.current = true;
+        try {
+          const { data: { user } } = await supabase.auth.setSession({
+            access_token: tok.access_token,
+            refresh_token: tok.refresh_token
+          });
+          if (user?.email) {
+            setEmail(user.email);
+            lastAccessTokenRef.current = tok.access_token;
+
+            writingStorageRef.current = true;
+            chrome.storage.local.set({ supabase_token: tok }, () => { setTimeout(() => { writingStorageRef.current = false; }, 0); });
           }
-        } else {
-          await supabase.auth.signOut();
+        } finally {
+          applyingExternalRef.current = false;
+        }
+      } else {
+        applyingExternalRef.current = true;
+        try {
+          await supabase.auth.signOut({ scope: 'local' });
           setEmail(null);
-          chrome.storage.local.remove('supabase_token');
+          lastAccessTokenRef.current = null;
+
+          writingStorageRef.current = true;
+          chrome.storage.local.remove('supabase_token', () => { setTimeout(() => { writingStorageRef.current = false; }, 0); });
+        } finally {
+          applyingExternalRef.current = false;
         }
       }
     };
@@ -78,19 +103,36 @@ const App: React.FC = () => {
     return () => chrome.runtime.onMessage.removeListener(listener);
   }, []);
 
-  // React to storage changes (e.g., background updates while popup is open)
   useEffect(() => {
     const onChange: Parameters<typeof chrome.storage.onChanged.addListener>[0] =
-      (changes, area) => {
+      async (changes, area) => {
         if (area !== 'local' || !changes.supabase_token) return;
-        const tok = changes.supabase_token.newValue as { access_token: string; refresh_token: string } | null;
         if (!supabase) return;
+        if (writingStorageRef.current) return;
+
+        const tok = changes.supabase_token.newValue as { access_token: string; refresh_token: string } | null;
+
         if (tok?.access_token && tok?.refresh_token) {
-          supabase.auth.setSession({ access_token: tok.access_token, refresh_token: tok.refresh_token })
-            .then(({ data }) => setEmail(data.user?.email ?? null))
-            .catch(() => setEmail(null));
+          const current = (await supabase.auth.getSession()).data.session;
+          if (current && current.access_token === tok.access_token) return;
+
+          applyingExternalRef.current = true;
+          try {
+            const { data } = await supabase.auth.setSession({ access_token: tok.access_token, refresh_token: tok.refresh_token });
+            setEmail(data.user?.email ?? null);
+            lastAccessTokenRef.current = tok.access_token;
+          } finally {
+            applyingExternalRef.current = false;
+          }
         } else {
-          supabase.auth.signOut().finally(() => setEmail(null));
+          applyingExternalRef.current = true;
+          try {
+            await supabase.auth.signOut({ scope: 'local' });
+            setEmail(null);
+            lastAccessTokenRef.current = null;
+          } finally {
+            applyingExternalRef.current = false;
+          }
         }
       };
     chrome.storage.onChanged.addListener(onChange);
@@ -113,18 +155,26 @@ const App: React.FC = () => {
     const s = data.session;
     if (s) {
       setEmail(data.user?.email ?? null);
+      lastAccessTokenRef.current = s.access_token;
+
       const tok = { access_token: s.access_token, refresh_token: s.refresh_token };
-      chrome.storage.local.set({ supabase_token: tok });
-      const msg: SessionMessage = { type: 'SYNC_TOKEN', token: tok };
+      writingStorageRef.current = true;
+      chrome.storage.local.set({ supabase_token: tok }, () => { setTimeout(() => { writingStorageRef.current = false; }, 0); });
+
+      const msg: SessionMessage = { type: 'SYNC_TOKEN', source: 'popup', token: tok };
       chrome.runtime.sendMessage(msg);
     }
   };
 
   const logout = async () => {
-    if (supabase) await supabase.auth.signOut();
+    if (supabase) await supabase.auth.signOut({ scope: 'local' });
     setEmail(null);
-    chrome.storage.local.remove('supabase_token');
-    const msg: SessionMessage = { type: 'SYNC_TOKEN', token: null };
+    lastAccessTokenRef.current = null;
+
+    writingStorageRef.current = true;
+    chrome.storage.local.remove('supabase_token', () => { setTimeout(() => { writingStorageRef.current = false; }, 0); });
+
+    const msg: SessionMessage = { type: 'SYNC_TOKEN', source: 'popup', token: null };
     chrome.tabs.query({ url: 'http://localhost:5173/*' }, (tabs) => {
       for (const tab of tabs) {
         if (tab.id) chrome.tabs.sendMessage(tab.id, msg);
