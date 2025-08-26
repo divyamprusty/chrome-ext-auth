@@ -1,0 +1,114 @@
+diff --git a/src/components/signin.tsx b/src/components/signin.tsx
+index 97559ff..d2c13c3 100644
+--- a/src/components/signin.tsx
++++ b/src/components/signin.tsx
+@@ -1,8 +1,7 @@
+-import React, { useState, useEffect } from "react"; // ← make sure useEffect is imported
++import React, { useState } from "react";
+ import type { FormEvent } from "react";
+ import { Link, useNavigate } from "react-router-dom";
+ import { UserAuth } from "../context/AuthContext";
+-import { supabase } from "../supabaseClient"; // ← assuming this is your client
+ 
+ const Signin: React.FC = () => {
+   const [email, setEmail] = useState<string>("");
+@@ -12,13 +11,6 @@ const Signin: React.FC = () => {
+   const { signInUser } = UserAuth();
+   const navigate = useNavigate();
+ 
+-  // 🧪 Debug listener for postMessage
+-  useEffect(() => {
+-    window.addEventListener("message", (e) => {
+-      console.log("WebApp →", e.data);
+-    });
+-  }, []);
+-
+   const handleSignIn = async (e: FormEvent<HTMLFormElement>) => {
+     e.preventDefault();
+     const result = await signInUser(email, password);
+@@ -28,18 +20,6 @@ const Signin: React.FC = () => {
+       setTimeout(() => setError(null), 3000);
+     } else {
+       setError(null);
+-
+-      const { data } = await supabase.auth.getSession();
+-      const token = data.session?.access_token;
+-
+-      if (token) {
+-        console.log("Posting token:", token); // ← confirm it's firing
+-        window.postMessage({
+-          type: "SYNC_TOKEN",
+-          token
+-        }, "http://localhost:3000"); // ← use explicit origin
+-      }
+-
+       navigate("/dashboard");
+     }
+   };
+diff --git a/src/context/AuthContext.tsx b/src/context/AuthContext.tsx
+index 0dc37c6..819269e 100644
+--- a/src/context/AuthContext.tsx
++++ b/src/context/AuthContext.tsx
+@@ -38,19 +38,44 @@ export const AuthContextProvider = ({ children }: { children: ReactNode }) => {
+   };
+ 
+   useEffect(() => {
+-    // Get initial session
++    // Get initial session and broadcast it
+     supabase.auth.getSession().then(({ data }) => {
+-      setSession(data.session ?? null);
++      const currentSession = data.session ?? null;
++      setSession(currentSession);
++      window.postMessage(
++        { type: "SYNC_TOKEN", token: currentSession?.access_token ?? null },
++        window.origin
++      );
+     });
+ 
+-    // Listen for auth state changes
+-    const { data: subscription } = supabase.auth.onAuthStateChange((_event, session) => {
+-      setSession(session);
++    // Listen for auth state changes and broadcast
++    const { data: subscription } = supabase.auth.onAuthStateChange((_event, changedSession) => {
++      const nextSession = changedSession ?? null;
++      setSession(nextSession);
++      window.postMessage(
++        { type: "SYNC_TOKEN", token: nextSession?.access_token ?? null },
++        window.origin
++      );
+     });
+ 
++    // Receive token sync from extension
++    const onMessage = async (event: MessageEvent) => {
++      if (event.source !== window || event.origin !== window.origin) return;
++      const msg = event.data as { type?: string; token?: string | null };
++      if (msg?.type !== "SYNC_TOKEN") return;
++
++      if (msg.token) {
++        await supabase.auth.setSession({ access_token: msg.token, refresh_token: "" });
++      } else {
++        await supabase.auth.signOut();
++      }
++    };
++    window.addEventListener("message", onMessage);
++
+     // Cleanup subscription on unmount
+     return () => {
+       subscription?.subscription.unsubscribe();
++      window.removeEventListener("message", onMessage);
+     };
+   }, []);
+ 
+diff --git a/src/router.tsx b/src/router.tsx
+index 5a672bb..9c4de21 100644
+--- a/src/router.tsx
++++ b/src/router.tsx
+@@ -2,7 +2,7 @@ import { createBrowserRouter } from "react-router-dom";
+ import App from "./App";
+ import Signup from "./components/signup";
+ import Signin from "./components/signin";
+-import Dashboard from "./routes/dashboard";
++import Dashboard from "./routes/Dashboard";
+ import PrivateRoute from "./components/PrivateRoute";
+ 
+ export const router = createBrowserRouter([
