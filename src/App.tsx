@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { supabase } from './auth/supabaseClient';
+import { getSupabase } from './auth/supabaseClient';
 import { SessionMessage } from './types';
 import './index.css';
 
@@ -10,15 +10,22 @@ const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
 
+  // Loop suppression flags
   const applyingExternalRef = useRef<boolean>(false);
+  const suppressNextBroadcastRef = useRef<boolean>(false);
   const writingStorageRef = useRef<boolean>(false);
   const lastAccessTokenRef = useRef<string | null>(null);
 
+  // Restore from extension storage on popup open
   useEffect(() => {
+    const sb = getSupabase();
+    if (!sb) return;
+
     chrome.storage.local.get('supabase_token', async ({ supabase_token }) => {
-      if (supabase_token && supabase) {
+      if (supabase_token) {
         try {
-          const { data: { user } } = await supabase.auth.setSession({
+          suppressNextBroadcastRef.current = true;
+          const { data: { user } } = await sb.auth.setSession({
             access_token: supabase_token.access_token,
             refresh_token: supabase_token.refresh_token
           });
@@ -33,9 +40,17 @@ const App: React.FC = () => {
     });
   }, []);
 
+  // Broadcast local auth changes (but not when applying external)
   useEffect(() => {
-    if (!supabase) return;
-    const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
+    const sb = getSupabase();
+    if (!sb) return;
+
+    const { data: sub } = sb.auth.onAuthStateChange((event, session) => {
+      // If we just applied an external token, drop the very next event
+      if (suppressNextBroadcastRef.current) {
+        suppressNextBroadcastRef.current = false;
+        return;
+      }
       if (applyingExternalRef.current) return;
 
       if ((event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') && session) {
@@ -58,20 +73,24 @@ const App: React.FC = () => {
     return () => sub?.subscription.unsubscribe();
   }, []);
 
+  // Receive forwarded tokens from background/web
   useEffect(() => {
+    const sb = getSupabase();
+    if (!sb) return;
+
     const listener = async (msg: unknown) => {
-      if (!supabase) return;
       const message = msg as SessionMessage;
       if (message.type !== 'SYNC_TOKEN' || message.source === 'popup') return;
 
       const tok = message.token;
       if (tok?.access_token && tok?.refresh_token) {
-        const current = (await supabase.auth.getSession()).data.session;
+        const current = (await sb.auth.getSession()).data.session;
         if (current && current.access_token === tok.access_token) return;
 
         applyingExternalRef.current = true;
+        suppressNextBroadcastRef.current = true;
         try {
-          const { data: { user } } = await supabase.auth.setSession({
+          const { data: { user } } = await sb.auth.setSession({
             access_token: tok.access_token,
             refresh_token: tok.refresh_token
           });
@@ -86,14 +105,20 @@ const App: React.FC = () => {
           applyingExternalRef.current = false;
         }
       } else {
+        const { data: { session: current } } = await sb.auth.getSession();
+        if (!current) return;
+
         applyingExternalRef.current = true;
+        suppressNextBroadcastRef.current = true;
         try {
-          await supabase.auth.signOut({ scope: 'local' });
+          await sb.auth.signOut({ scope: 'local' });
           setEmail(null);
           lastAccessTokenRef.current = null;
 
           writingStorageRef.current = true;
           chrome.storage.local.remove('supabase_token', () => { setTimeout(() => { writingStorageRef.current = false; }, 0); });
+        } catch {
+          // ignore 403 or already-signed-out
         } finally {
           applyingExternalRef.current = false;
         }
@@ -103,33 +128,43 @@ const App: React.FC = () => {
     return () => chrome.runtime.onMessage.removeListener(listener);
   }, []);
 
+  // React to storage changes (only when not writing ourselves)
   useEffect(() => {
+    const sb = getSupabase();
+    if (!sb) return;
+
     const onChange: Parameters<typeof chrome.storage.onChanged.addListener>[0] =
       async (changes, area) => {
         if (area !== 'local' || !changes.supabase_token) return;
-        if (!supabase) return;
         if (writingStorageRef.current) return;
 
         const tok = changes.supabase_token.newValue as { access_token: string; refresh_token: string } | null;
 
         if (tok?.access_token && tok?.refresh_token) {
-          const current = (await supabase.auth.getSession()).data.session;
+          const current = (await sb.auth.getSession()).data.session;
           if (current && current.access_token === tok.access_token) return;
 
           applyingExternalRef.current = true;
+          suppressNextBroadcastRef.current = true;
           try {
-            const { data } = await supabase.auth.setSession({ access_token: tok.access_token, refresh_token: tok.refresh_token });
+            const { data } = await sb.auth.setSession({ access_token: tok.access_token, refresh_token: tok.refresh_token });
             setEmail(data.user?.email ?? null);
             lastAccessTokenRef.current = tok.access_token;
           } finally {
             applyingExternalRef.current = false;
           }
         } else {
+          const { data: { session: current } } = await sb.auth.getSession();
+          if (!current) return;
+
           applyingExternalRef.current = true;
+          suppressNextBroadcastRef.current = true;
           try {
-            await supabase.auth.signOut({ scope: 'local' });
+            await sb.auth.signOut({ scope: 'local' });
             setEmail(null);
             lastAccessTokenRef.current = null;
+          } catch {
+            // ignore 403 or already-signed-out
           } finally {
             applyingExternalRef.current = false;
           }
@@ -140,10 +175,12 @@ const App: React.FC = () => {
   }, []);
 
   const login = async () => {
-    if (!supabase) return;
+    const sb = getSupabase();
+    if (!sb) return;
+
     setLoading(true);
     setError(null);
-    const { data, error } = await supabase.auth.signInWithPassword({
+    const { data, error } = await sb.auth.signInWithPassword({
       email: formEmail.toLowerCase(),
       password: formPassword
     });
@@ -167,7 +204,17 @@ const App: React.FC = () => {
   };
 
   const logout = async () => {
-    if (supabase) await supabase.auth.signOut({ scope: 'local' });
+    const sb = getSupabase();
+    if (!sb) return;
+
+    const { data: { session: current } } = await sb.auth.getSession();
+    if (current) {
+      try {
+        await sb.auth.signOut({ scope: 'local' });
+      } catch {
+        // ignore 403 or already-signed-out
+      }
+    }
     setEmail(null);
     lastAccessTokenRef.current = null;
 
