@@ -1,4 +1,14 @@
-@import "tailwindcss";  
+@import "tailwindcss";
+
+html, body, #root {
+  width: var(--popup-width);
+  min-height: var(--popup-min-height);
+}
+
+* {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
 
 :root {
   font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
@@ -13,6 +23,8 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  --popup-width: 360px;
+  --popup-min-height: 420px;
 }
 
 a {
