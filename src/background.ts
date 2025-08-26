@@ -4,6 +4,7 @@ const WEB_APP_URL_PATTERNS = ['http://localhost:5173/*', 'http://127.0.0.1:5173/
 
 function sendRuntimeMessageSafe(message: SessionMessage): void {
 	try {
+        console.log('Popup sending SYNC_TOKEN', message);
 		chrome.runtime.sendMessage(message, () => {
 			void chrome.runtime.lastError;
 		});
@@ -26,6 +27,7 @@ function sendMessageToTabSafe(tabId: number, message: SessionMessage): Promise<v
 }
 
 chrome.runtime.onMessage.addListener((msg: unknown, _sender, sendResponse) => {
+    console.log('Background got', msg);
 	const message = msg as SessionMessage;
 	if (message.type !== 'SYNC_TOKEN') return;
 

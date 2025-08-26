@@ -28,6 +28,7 @@ if (isRuntimeAvailable()) {
   chrome.runtime.onMessage.addListener((msg: unknown) => {
     const message = msg as SessionMessage;
     if (message.type === 'SYNC_TOKEN') {
+      console.log("Content script to page: ", message)
       // Safe; window.postMessage doesn't require extension context
       window.postMessage(message, window.origin);
     }
