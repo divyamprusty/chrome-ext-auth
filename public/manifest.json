@@ -2,28 +2,21 @@
   "manifest_version": 3,
   "name": "Supabase Auth Extension",
   "version": "1.0",
-  "permissions": ["storage", "identity"],
-  "host_permissions": ["https://*.supabase.co/"],
-  "background": {
-    "service_worker": "background.js"
-  },
-  "action": {
-    "default_popup": "popup.html"
-  },
+  "permissions": ["storage", "identity", "tabs"],
+  "host_permissions": ["http://localhost/*", "http://127.0.0.1/*", "https://*.supabase.co/"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_popup": "popup.html" },
   "content_scripts": [
     {
-      "matches": ["http://localhost:5173/*", "http://127.0.0.1:5173/*"],
+      "matches": ["http://localhost/*", "http://127.0.0.1/*"],
       "js": ["contentScript.js"],
       "run_at": "document_start"
     }
   ],
   "web_accessible_resources": [
-    {
-      "resources": ["assets/*"],
-      "matches": ["<all_urls>"]
-    }
+    { "resources": ["assets/*"], "matches": ["<all_urls>"] }
   ],
   "externally_connectable": {
-    "matches": ["http://localhost:5173/*", "http://127.0.0.1:5173/*"]
+    "matches": ["http://localhost/*", "http://127.0.0.1/*"]
   }
 }
