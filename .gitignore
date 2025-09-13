@@ -1,0 +1,80 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+package-lock.json
+yarn.lock
+
+# Next.js
+.next/
+out/
+.next-server/
+.next/cache/
+
+# Build output
+build/
+dist/
+*.zip
+
+# Environment variables
+.env
+.env.local
+.env.development
+.env.production
+.env.test
+
+# Debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+*.sw?
+
+# Testing
+coverage/
+.nyc_output/
+
+# Local development
+.cache/
+.temp/
+.turbo/
+
+# Prisma
+/src/generated/prisma/
+/prisma/migrations/
+/prisma/*.db
+/prisma/*.sqlite
+/prisma/*.sqlite-journal
+/prisma/*.sql
+/prisma/query-engine-*
+/prisma/libquery_engine-*
+/prisma/dev.db
+
+# TypeScript
+*.tsbuildinfo
+
+# Chrome extension specific
+*.pem
+*.p12
+*.crt
+
+# Logs
+logs/
+*.log
+
+# Optional npm cache directory
+.npm
+
+# Optional eslint cache
+.eslintcache

@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "ChatBot Extension",
+  "version": "1.0.0",
+  "description": "A chatbot extension that integrates with your web app",
+  "permissions": [
+    "sidePanel",
+    "storage"
+  ],
+  "host_permissions": [
+    "http://localhost:3000/*",
+    "https://pghywddpncjauftwmssb.supabase.co/*"
+  ],
+  "side_panel": {
+    "default_path": "index.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://localhost:3000/*",
+        "https://pghywddpncjauftwmssb.supabase.co/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["index.html", "dashboard.html", "dashboard-script.js", "static/**/*", "extension-setup.js"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
+}
