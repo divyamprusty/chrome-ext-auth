@@ -1,1 +1,0 @@
-{"root":["./src/app.tsx","./src/background.ts","./src/contentscript.ts","./src/main.tsx","./src/types.ts","./src/vite-env.d.ts","./src/auth/supabaseclient.ts"],"version":"5.8.3"}
